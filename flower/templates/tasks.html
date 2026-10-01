@@ -17,12 +17,14 @@
     </div>
   </header>
 
-  <nav class="task-state-filters" aria-label="Filter tasks by state">
+  <nav class="task-state-filters" aria-label="Filter tasks">
     <button class="task-state-filter active" type="button" data-task-state="" aria-pressed="true">All</button>
     <button class="task-state-filter" type="button" data-task-state="STARTED" aria-pressed="false">Started</button>
     <button class="task-state-filter" type="button" data-task-state="SUCCESS" aria-pressed="false">Succeeded</button>
     <button class="task-state-filter" type="button" data-task-state="FAILURE" aria-pressed="false">Failed</button>
     <button class="task-state-filter" type="button" data-task-state="RETRY" aria-pressed="false">Retried</button>
+    <button class="task-unverified-filter" id="task-unverified-filter" type="button" aria-pressed="false"
+            title="Show only tasks whose worker went offline after they started">Unverified</button>
   </nav>
 
   <section class="tasks-table-card" aria-label="Tasks">

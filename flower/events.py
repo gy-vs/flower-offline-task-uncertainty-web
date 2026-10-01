@@ -8,6 +8,7 @@ import time
 from collections import Counter
 from functools import partial
 
+from celery import states
 from celery.events import EventReceiver
 from celery.events.state import State
 from kombu.exceptions import OperationalError
@@ -21,6 +22,21 @@ from .utils.search import TaskSearchEngine
 logger = logging.getLogger(__name__)
 
 PROMETHEUS_METRICS = None
+
+#: Task events that report something new about the execution itself.
+#: Any of them accounts for a task whose worker went offline, so it
+#: lifts the unverified mark. task-received/task-sent only describe
+#: delivery and say nothing about the fate of a started execution.
+VERIFYING_EVENTS = frozenset({
+    'task-started', 'task-succeeded', 'task-failed',
+    'task-retried', 'task-revoked', 'task-rejected',
+})
+
+
+def _restore_events_state(cls, args, unverified_tasks):
+    state = cls(*args)
+    state.unverified_tasks.update(unverified_tasks)
+    return state
 
 
 def get_prometheus_metrics():
@@ -110,14 +126,33 @@ class EventsState(State):
     # EventsState object is created and accessed only from ioloop thread
 
     def __init__(self, *args, **kwargs):
+        # Tasks whose executing worker went offline before they reported
+        # an outcome, mapped to that worker's hostname. Their state
+        # stays STARTED; the mark only means the result is unverified.
+        self.unverified_tasks = {}
         super().__init__(*args, **kwargs)
         self.counter = collections.defaultdict(Counter)
         self.metrics = get_prometheus_metrics()
         self.search_engine = TaskSearchEngine()
         self.search_engine.rebuild(self.tasks.items())
 
+    def __reduce__(self):
+        cls, args = super().__reduce__()
+        return (_restore_events_state, (cls, args, dict(self.unverified_tasks)))
+
+    def is_unverified(self, task_id):
+        return task_id in self.unverified_tasks
+
+    def prune_unverified_tasks(self):
+        # Marks are a side note about tracked tasks, never kept around
+        # for tasks the state itself has forgotten
+        for task_id in list(self.unverified_tasks):
+            if task_id not in self.tasks:
+                del self.unverified_tasks[task_id]
+
     def _clear_tasks(self, ready=True):
         super()._clear_tasks(ready)
+        self.prune_unverified_tasks()
         self.search_engine.rebuild(self.tasks.items())
 
     def _eviction_candidate(self, task_id):
@@ -131,7 +166,18 @@ class EventsState(State):
     def _index_task(self, task, evicted):
         if evicted is not None and evicted not in self.tasks:
             self.search_engine.remove(evicted)
+            self.unverified_tasks.pop(evicted, None)
         self.search_engine.upsert(task)
+
+    def _flag_unverified_tasks(self, hostname):
+        # A worker going offline says nothing about the outcome of the
+        # tasks it was executing: their last event is task-started and
+        # stays so until a fresh task event accounts for them
+        for uuid, task in self.tasks.items():
+            if task.state != states.STARTED:
+                continue
+            if getattr(task.worker, 'hostname', None) == hostname:
+                self.unverified_tasks[uuid] = hostname
 
     def event(self, event):
         event_type, worker = event['type'], event['hostname']
@@ -145,8 +191,12 @@ class EventsState(State):
             task = self.tasks[event['uuid']]
             self._index_task(task, evicted)
             self.metrics.observe_task(worker, event, task)
+            if event_type in VERIFYING_EVENTS:
+                self.unverified_tasks.pop(event['uuid'], None)
         else:
             self.metrics.observe_worker(worker, event)
+            if event_type == 'worker-offline':
+                self._flag_unverified_tasks(worker)
 
 
 class Events(threading.Thread):
@@ -175,6 +225,7 @@ class Events(threading.Thread):
                 # A restored state keeps the limit it was saved with
                 self.state.max_tasks_in_memory = self.state.tasks.limit = max_tasks_in_memory
                 self.state.tasks.update()
+                self.state.prune_unverified_tasks()
 
             if state_save_interval:
                 self.state_save_timer = PeriodicCallback(self.save_state,

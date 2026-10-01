@@ -215,6 +215,31 @@ class TestTaskSearchEngine(unittest.TestCase):
         self.assertEqual(2, page.filtered_count)
         self.assertEqual(4, page.total_count)
 
+    def test_unverified_ids_filter(self):
+        page = self.engine.search(self.tasks, unverified_ids={'1', '3'})
+
+        self.assertEqual({'1', '3'}, set(page.task_ids))
+        self.assertEqual(2, page.filtered_count)
+        self.assertEqual(4, page.total_count)
+
+    def test_unverified_ids_filter_combines_with_state_and_query(self):
+        page = self.engine.search(
+            self.tasks, 'result:timeout', state='FAILURE',
+            unverified_ids={'1', '3'})
+
+        self.assertEqual(['1'], page.task_ids)
+
+        page = self.engine.search(
+            self.tasks, state='SUCCESS', unverified_ids={'1', '3'})
+
+        self.assertEqual([], page.task_ids)
+        self.assertEqual(0, page.filtered_count)
+
+    def test_unverified_ids_none_disables_the_filter(self):
+        page = self.engine.search(self.tasks, unverified_ids=None)
+
+        self.assertEqual(4, page.filtered_count)
+
     def test_remove_clears_document_and_postings(self):
         self.engine.remove('1')
 

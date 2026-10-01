@@ -4,7 +4,7 @@ import logging
 from tornado import web
 
 from ..utils.search import QuerySyntaxError
-from ..utils.tasks import as_dict, get_task_by_id, search_tasks
+from ..utils.tasks import as_dict, get_task_by_id, is_unverified, search_tasks
 from ..views import BaseHandler
 
 logger = logging.getLogger(__name__)
@@ -17,10 +17,12 @@ class TaskView(BaseHandler):
 
         if task is None:
             raise web.HTTPError(404, f"Unknown task '{task_id}'")
+        unverified = is_unverified(self.application.events, task_id)
         task = self.format_task(task)
         self.render(
             "task.html",
             task=task,
+            unverified=unverified,
             read_only=self.application.options.read_only,
         )
 
@@ -34,6 +36,7 @@ class TasksDataTable(BaseHandler):
         start = self.get_argument('start', type=int, required=True)
         length = self.get_argument('length', type=int, required=True)
         search = self.get_argument('search[value]', '', escape=False)
+        unverified = self.get_argument('unverified', None, type=bool)
 
         column = self.get_argument('order[0][column]', type=int, required=True)
         sort_by = self.get_argument(f'columns[{column}][data]', '', type=str)
@@ -46,7 +49,8 @@ class TasksDataTable(BaseHandler):
                 sort_by=sort_by,
                 descending=sort_order,
                 offset=start,
-                limit=length)
+                limit=length,
+                unverified=unverified)
         except QuerySyntaxError as exc:
             self.write({
                 "draw": draw,
@@ -66,6 +70,7 @@ class TasksDataTable(BaseHandler):
             task_dict = as_dict(self.format_task((task_id, task))[1])
             if task_dict.get('worker'):
                 task_dict['worker'] = task_dict['worker'].hostname
+            task_dict['unverified'] = is_unverified(app.events, task_id)
 
             filtered_tasks.append(task_dict)
 

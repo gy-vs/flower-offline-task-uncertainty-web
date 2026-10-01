@@ -365,8 +365,8 @@ class TaskSearchEngine:
 
     # pylint: disable=too-many-arguments,too-many-locals
     def search(self, tasks, query='', *, task_type=None, worker=None, state=None,
-               received_start=None, received_end=None, sort_by=None,
-               descending=False, offset=0, limit=None):
+               unverified_ids=None, received_start=None, received_end=None,
+               sort_by=None, descending=False, offset=0, limit=None):
         task_map = getattr(tasks, 'data', tasks)
         task_ids = set(self.documents)
         task_ids.intersection_update(task_map.keys())
@@ -380,6 +380,8 @@ class TaskSearchEngine:
         if state:
             task_ids.intersection_update(
                 self.exact_postings['state'].get(_normalize(state), ()))
+        if unverified_ids is not None:
+            task_ids.intersection_update(unverified_ids)
 
         if received_start is not None or received_end is not None:
             task_ids = {

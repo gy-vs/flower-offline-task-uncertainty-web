@@ -515,3 +515,78 @@ class TaskTests(BaseApiTestCase):
             'Substring search terms must contain at least 3 characters '
             'at position 0.',
             error['error'])
+
+
+class UnverifiedTasksApiTests(BaseApiTestCase):
+    def setUp(self):
+        super().setUp()
+        state = EventsState()
+        events = [Event('worker-online', hostname='worker1'),
+                  Event('worker-online', hostname='worker2')]
+        events += task_succeeded_events(worker='worker2', name='task1', id='ok-1')
+        events += [Event('task-received', uuid='lost-1', name='billing.charge',
+                         args='(2, 2)', kwargs='{}', retries=0, eta=None,
+                         hostname='worker1'),
+                   Event('task-started', uuid='lost-1', hostname='worker1'),
+                   Event('worker-offline', hostname='worker1')]
+        for i, e in enumerate(events):
+            e['clock'] = i
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+
+    def test_task_list_marks_unverified_tasks(self):
+        r = self.get('/api/tasks')
+
+        self.assertEqual(200, r.code)
+        tasks = json.loads(r.body.decode('utf-8'))
+        self.assertEqual(
+            {'ok-1': False, 'lost-1': True},
+            {uuid: task['unverified'] for uuid, task in tasks.items()})
+        # the celery-reported state is untouched
+        self.assertEqual('STARTED', tasks['lost-1']['state'])
+        self.assertEqual('SUCCESS', tasks['ok-1']['state'])
+
+    def test_task_list_filters_unverified_tasks_server_side(self):
+        r = self.get('/api/tasks?unverified=true')
+
+        self.assertEqual(200, r.code)
+        tasks = json.loads(r.body.decode('utf-8'))
+        self.assertEqual(['lost-1'], list(tasks))
+
+        r = self.get('/api/tasks?unverified=false')
+        self.assertEqual(2, len(json.loads(r.body.decode('utf-8'))))
+
+    def test_state_filter_still_matches_unverified_tasks(self):
+        r = self.get('/api/tasks?state=STARTED')
+
+        self.assertEqual(200, r.code)
+        tasks = json.loads(r.body.decode('utf-8'))
+        self.assertEqual(['lost-1'], list(tasks))
+
+    def test_task_info_reports_unverified(self):
+        r = self.get('/api/task/info/lost-1')
+
+        self.assertEqual(200, r.code)
+        info = json.loads(r.body)
+        self.assertEqual('STARTED', info['state'])
+        self.assertTrue(info['unverified'])
+
+        r = self.get('/api/task/info/ok-1')
+        self.assertFalse(json.loads(r.body)['unverified'])
+
+    def test_task_info_stops_reporting_unverified_after_outcome(self):
+        state = self._app.events.state
+        for i, e in enumerate([
+                Event('task-succeeded', uuid='lost-1', result='4',
+                      runtime=0.1, hostname='worker1')]):
+            e['clock'] = 100 + i
+            e['local_received'] = time.time()
+            state.event(e)
+
+        r = self.get('/api/task/info/lost-1')
+
+        info = json.loads(r.body)
+        self.assertEqual('SUCCESS', info['state'])
+        self.assertFalse(info['unverified'])
+

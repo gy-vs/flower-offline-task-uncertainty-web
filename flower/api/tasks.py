@@ -507,6 +507,7 @@ List tasks
           "succeeded": 1398505411.124802,
           "timestamp": 1398505411.124802,
           "traceback": null,
+          "unverified": false,
           "uuid": "e42ceb2d-8730-47b5-8b4d-8e0d2a1ef7c9",
           "worker": "celery@worker1"
       },
@@ -534,6 +535,7 @@ List tasks
           "succeeded": 1398505395.341089,
           "timestamp": 1398505395.341089,
           "traceback": null,
+          "unverified": false,
           "uuid": "f67ea225-ae9e-42a8-90b0-5de0b24507e0",
           "worker": "celery@worker1"
       }
@@ -545,6 +547,8 @@ List tasks
 :query workername: filter task by workername
 :query taskname: filter tasks by taskname
 :query state: filter tasks by state
+:query unverified: if true, only return tasks whose worker went offline after \
+they started, leaving their result unverified
 :query received_start: filter tasks by received date (must be greater than) format %Y-%m-%d %H:%M
 :query received_end: filter tasks by received date (must be less than) format %Y-%m-%d %H:%M
 :query search: search task details using the task-filter query syntax
@@ -559,6 +563,7 @@ List tasks
         worker = self.get_argument('workername', None)
         type = self.get_argument('taskname', None)
         state = self.get_argument('state', None)
+        unverified = self.get_argument('unverified', None, type=bool)
         received_start = self.get_argument('received_start', None)
         received_end = self.get_argument('received_end', None)
         sort_by = self.get_argument('sort_by', None)
@@ -582,13 +587,15 @@ List tasks
                     worker=worker, state=state,
                     received_start=received_start,
                     received_end=received_end,
-                    search=search
+                    search=search,
+                    unverified=unverified
             )
             for task_id, task in task_iterator:
                 task = tasks.as_dict(task)
                 worker = task.pop('worker', None)
                 if worker is not None:
                     task['worker'] = worker.hostname
+                task['unverified'] = tasks.is_unverified(app.events, task_id)
                 result.append((task_id, task))
         except QuerySyntaxError as exc:
             self.set_status(400)
@@ -689,6 +696,7 @@ Get a task info
       "task-id": "91396550-c228-4111-9da4-9d88cfd5ddc6",
       "timestamp": 1400806243.975336,
       "traceback": null,
+      "unverified": false,
       "worker": "celery@worker1"
   }
 
@@ -705,5 +713,7 @@ Get a task info
         response = task.as_dict()
         if task.worker is not None:
             response['worker'] = task.worker.hostname
+        response['unverified'] = tasks.is_unverified(
+            self.application.events, taskid)
 
         self.write(response)

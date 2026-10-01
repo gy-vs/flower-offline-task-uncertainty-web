@@ -86,6 +86,190 @@ class TaskControlsTest(AsyncHTTPTestCase):
         self.assertNotIn('task-revoke', str(r.body))
 
 
+class UnverifiedTaskViewTest(AsyncHTTPTestCase):
+    def render_task(self, *events):
+        state = EventsState()
+        for i, e in enumerate(events):
+            e['clock'] = i
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+        return self.get('/task/123')
+
+    @staticmethod
+    def task_events(*types, worker='worker1'):
+        events = []
+        for event_type in types:
+            if event_type == 'task-received':
+                events.append(Event(
+                    event_type, uuid='123', name='billing.charge', args='(2, 2)',
+                    kwargs="{'foo': 'bar'}", retries=0, eta=None,
+                    hostname=worker))
+            else:
+                events.append(Event(event_type, uuid='123', hostname=worker))
+        return events
+
+    def test_unverified_task_keeps_started_state_and_shows_hint(self):
+        r = self.render_task(
+            Event('worker-online', hostname='worker1'),
+            *self.task_events('task-received', 'task-started'),
+            Event('worker-offline', hostname='worker1'))
+
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertIn('task-state-started', body)
+        self.assertIn('task-state-unverified', body)
+        self.assertIn('result is unverified', body)
+
+    def test_unverified_task_has_no_terminate_button(self):
+        r = self.render_task(
+            Event('worker-online', hostname='worker1'),
+            *self.task_events('task-received', 'task-started'),
+            Event('worker-offline', hostname='worker1'))
+
+        self.assertEqual(200, r.code)
+        self.assertNotIn('task-terminate', str(r.body))
+
+    def test_started_task_on_online_worker_keeps_terminate_button(self):
+        r = self.render_task(
+            Event('worker-online', hostname='worker1'),
+            *self.task_events('task-received', 'task-started'))
+
+        self.assertEqual(200, r.code)
+        self.assertIn('task-terminate', str(r.body))
+        self.assertNotIn('task-state-unverified', str(r.body))
+
+    def test_worker_coming_back_online_keeps_the_hint(self):
+        r = self.render_task(
+            Event('worker-online', hostname='worker1'),
+            *self.task_events('task-received', 'task-started'),
+            Event('worker-offline', hostname='worker1'),
+            Event('worker-online', hostname='worker1'))
+
+        self.assertEqual(200, r.code)
+        self.assertIn('task-state-unverified', str(r.body))
+        self.assertNotIn('task-terminate', str(r.body))
+
+    def test_terminate_button_returns_when_task_starts_elsewhere(self):
+        r = self.render_task(
+            Event('worker-online', hostname='worker1'),
+            *self.task_events('task-received', 'task-started'),
+            Event('worker-offline', hostname='worker1'),
+            Event('task-started', uuid='123', hostname='worker2'))
+
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertIn('task-terminate', body)
+        self.assertNotIn('task-state-unverified', body)
+
+    def test_succeeded_task_shows_no_hint(self):
+        r = self.render_task(
+            Event('worker-online', hostname='worker1'),
+            *self.task_events('task-received', 'task-started'),
+            Event('worker-offline', hostname='worker1'),
+            Event('task-succeeded', uuid='123', result='4', runtime=0.1,
+                  hostname='worker1'))
+
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertIn('text-bg-success', body)
+        self.assertNotIn('task-state-unverified', body)
+
+    def test_unverified_task_has_no_terminate_button_in_read_only(self):
+        with self.mock_option('read_only', True):
+            r = self.render_task(
+                Event('worker-online', hostname='worker1'),
+                *self.task_events('task-received', 'task-started'),
+                Event('worker-offline', hostname='worker1'))
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertNotIn('task-terminate', body)
+        self.assertIn('task-state-unverified', body)
+
+
+class UnverifiedTasksTableTest(AsyncHTTPTestCase):
+    def setUp(self):
+        super().setUp()
+        state = EventsState()
+        events = [Event('worker-online', hostname='worker1'),
+                  Event('worker-online', hostname='worker2')]
+        events += task_succeeded_events(worker='worker2', name='task1', id='ok-1')
+        events += task_succeeded_events(worker='worker1', name='task1', id='ok-2')
+        events += [Event('task-received', uuid='lost-1', name='billing.charge',
+                         args='(2, 2)', kwargs='{}', retries=0, eta=None,
+                         hostname='worker1'),
+                   Event('task-started', uuid='lost-1', hostname='worker1'),
+                   Event('task-received', uuid='pending-1', name='billing.charge',
+                         args='(3, 3)', kwargs='{}', retries=0, eta=None,
+                         hostname='worker1'),
+                   Event('worker-offline', hostname='worker1')]
+        for i, e in enumerate(events):
+            e['clock'] = i
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+
+    def datatable(self, **extra):
+        params = {'draw': 1, 'start': 0, 'length': 10,
+                  'search[value]': '',
+                  'order[0][column]': 0, 'columns[0][data]': 'name',
+                  'order[0][dir]': 'asc'}
+        params.update(extra)
+        r = self.get('/tasks/datatable?' + urlencode(params))
+        self.assertEqual(200, r.code)
+        return json.loads(r.body.decode('utf-8'))
+
+    def test_rows_carry_the_unverified_flag(self):
+        table = self.datatable()
+
+        self.assertEqual(4, table['recordsTotal'])
+        flags = {row['uuid']: row['unverified'] for row in table['data']}
+        self.assertEqual(
+            {'ok-1': False, 'ok-2': False, 'lost-1': True, 'pending-1': False},
+            flags)
+        # the celery-reported state is untouched
+        states = {row['uuid']: row['state'] for row in table['data']}
+        self.assertEqual('STARTED', states['lost-1'])
+        self.assertEqual('RECEIVED', states['pending-1'])
+
+    def test_unverified_filter_is_applied_server_side(self):
+        table = self.datatable(unverified='true')
+
+        self.assertEqual(4, table['recordsTotal'])
+        self.assertEqual(1, table['recordsFiltered'])
+        self.assertEqual(['lost-1'], [row['uuid'] for row in table['data']])
+
+    def test_unverified_filter_paginates_before_slicing(self):
+        # the flagged task sorts last; a client-side-only filter of the
+        # first page would miss it
+        table = self.datatable(unverified='true', **{
+            'order[0][dir]': 'asc', 'columns[0][data]': 'uuid',
+            'start': 0, 'length': 2})
+
+        self.assertEqual(1, table['recordsFiltered'])
+        self.assertEqual(['lost-1'], [row['uuid'] for row in table['data']])
+
+    def test_state_search_still_matches_unverified_tasks(self):
+        table = self.datatable(**{'search[value]': 'state:STARTED'})
+
+        self.assertEqual(['lost-1'], [row['uuid'] for row in table['data']])
+
+    def test_unverified_filter_combines_with_search(self):
+        table = self.datatable(unverified='true',
+                               **{'search[value]': 'state:STARTED'})
+        self.assertEqual(['lost-1'], [row['uuid'] for row in table['data']])
+
+        table = self.datatable(unverified='true',
+                               **{'search[value]': 'state:SUCCESS'})
+        self.assertEqual([], table['data'])
+
+    def test_tasks_page_offers_the_unverified_filter(self):
+        r = self.get('/tasks')
+        self.assertEqual(200, r.code)
+        self.assertIn('id="task-unverified-filter"', str(r.body))
+
+
+
 class TasksTest(AsyncHTTPTestCase):
     def test_no_task(self):
         r = self.get('/tasks')

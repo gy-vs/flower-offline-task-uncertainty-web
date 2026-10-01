@@ -5,7 +5,7 @@ import time
 # pylint: disable=too-many-branches,too-many-locals,too-many-arguments
 def iter_tasks(events, limit=None, offset=0, type=None, worker=None, state=None,
                sort_by=None, received_start=None, received_end=None,
-               search=None):
+               search=None, unverified=False):
     descending = False
     if sort_by is not None:
         assert sort_by.lstrip('-') in SORT_KEYS
@@ -16,7 +16,7 @@ def iter_tasks(events, limit=None, offset=0, type=None, worker=None, state=None,
         events, limit=limit, offset=offset, type=type, worker=worker,
         state=state, sort_by=sort_by, descending=descending,
         received_start=received_start, received_end=received_end,
-        search=search)
+        search=search, unverified=unverified)
     task_map = getattr(events.state.tasks, 'data', events.state.tasks)
     for task_id in page.task_ids:
         task = task_map.get(task_id)
@@ -26,13 +26,18 @@ def iter_tasks(events, limit=None, offset=0, type=None, worker=None, state=None,
 
 def search_tasks(events, limit=None, offset=0, type=None, worker=None,
                  state=None, sort_by=None, descending=False,
-                 received_start=None, received_end=None, search=None):
+                 received_start=None, received_end=None, search=None,
+                 unverified=False):
+    unverified_ids = None
+    if unverified:
+        unverified_ids = getattr(events.state, 'unverified_tasks', None) or {}
     return events.state.search_engine.search(
         events.state.tasks,
         search or '',
         task_type=type,
         worker=worker,
         state=state,
+        unverified_ids=unverified_ids,
         received_start=_convert_datetime(received_start),
         received_end=_convert_datetime(received_end),
         sort_by=sort_by,
@@ -53,6 +58,12 @@ SORT_KEYS = frozenset({'name', 'state', 'received', 'started'})
 
 def get_task_by_id(events, task_id):
     return events.state.tasks.get(task_id)
+
+
+def is_unverified(events, task_id):
+    "True if the task's worker went offline mid-execution and no task event accounted for it since"
+    unverified_tasks = getattr(events.state, 'unverified_tasks', None)
+    return bool(unverified_tasks) and task_id in unverified_tasks
 
 
 def as_dict(task):

@@ -615,8 +615,17 @@
                     badge = 'text-bg-secondary';
                 }
                 // celery reports unknown task-* events as custom states
-                return '<span class="badge ' + badge + '">' +
+                var rendered = '<span class="badge ' + badge + '">' +
                     htmlEscapeEntities(data) + '</span>';
+                if (full.unverified) {
+                    // The worker running the task went offline before the
+                    // task reported an outcome; the state is what celery
+                    // last reported, the result is unverified
+                    rendered += ' <span class="badge task-state-unverified" ' +
+                        'title="The worker executing this task went offline; the result is unverified">' +
+                        'UNVERIFIED</span>';
+                }
+                return rendered;
             }
         },
         args: {
@@ -906,6 +915,7 @@
                 var value = decodeURIComponent($.urlParam(key) || '');
                 return value ? key + ':' + value : '';
             }).filter(Boolean).join(' '),
+            unverifiedOnly = $.urlParam('unverified') === 'true',
             // The server renders the header in the configured order
             headerColumns = $('#tasks-table thead th').map(function () {
                 return $(this).data('column');
@@ -952,6 +962,11 @@
             ajax: {
                 type: 'POST',
                 url: url_prefix() + '/tasks/datatable',
+                data: function (params) {
+                    if (unverifiedOnly) {
+                        params.unverified = 'true';
+                    }
+                },
                 dataSrc: function (response) {
                     var searchError = $('#task-search-error'),
                         searchErrorMessage = $('#task-search-error-message');
@@ -981,6 +996,16 @@
             var state = $(this).data('task-state');
             tasksTable.search(state ? 'state:' + state : '').draw();
             updateTaskStateButtons(state);
+        });
+
+        var unverifiedToggle = $('#task-unverified-filter');
+        unverifiedToggle.toggleClass('active', unverifiedOnly)
+            .attr('aria-pressed', unverifiedOnly);
+        unverifiedToggle.on('click', function () {
+            unverifiedOnly = !unverifiedOnly;
+            unverifiedToggle.toggleClass('active', unverifiedOnly)
+                .attr('aria-pressed', unverifiedOnly);
+            tasksTable.draw();
         });
 
         tasksTable.on('search.dt', function () {
