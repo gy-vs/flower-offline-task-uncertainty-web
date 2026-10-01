@@ -14,7 +14,7 @@
     <p class="page-eyebrow">Task details</p>
     <div class="detail-actions">
       {% if not read_only %}
-      {% if task.state == "STARTED" %}
+      {% if task.state == "STARTED" and not unverified %}
       <button class="btn btn-danger" id="task-terminate">Terminate</button>
       {% elif task.state == "RECEIVED" or task.state == "RETRY" %}
       <button class="btn btn-danger" id="task-revoke">Revoke</button>
@@ -22,6 +22,18 @@
       {% end %}
     </div>
   </header>
+
+  {% if unverified %}
+  <div class="alert alert-warning task-unverified-alert" role="alert">
+    <strong>Execution unverified.</strong>
+    The last event for this task is <code>task-started</code>, but
+    {% if task.worker is not None %}<code>{{ task.worker.hostname }}</code>{% else %}the worker{% end %}
+    went offline before Flower saw the result. Flower cannot tell whether the
+    task finished; the reported state is still
+    <code>{{ task.state }}</code>. Terminating the original worker process is
+    no longer possible.
+  </div>
+  {% end %}
 
   <section class="detail-card task-details-card" aria-label="Task details">
     <dl class="detail-list">
@@ -62,6 +74,12 @@
           <span class="badge text-bg-warning">{{ task.state }}</span>
           {% else %}
           <span class="badge text-bg-secondary">{{ task.state }}</span>
+          {% end %}
+          {% if unverified %}
+          <span class="badge text-bg-warning task-unverified-badge"
+                title="The worker executing this task went offline before Flower saw its result">
+            UNVERIFIED
+          </span>
           {% end %}
         </dd>
       </div>

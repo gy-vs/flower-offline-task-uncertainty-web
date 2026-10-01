@@ -48,6 +48,15 @@ class HtmlTableParser(HTMLParser):
                 return [cell.text for cell in cells]
 
 
+def task_started_events(worker, id=None, name=None):
+    id = id or uuid()
+    name = name or 'sometask'
+    return [Event('task-received', uuid=id, name=name,
+                  args='(2, 2)', kwargs="{'foo': 'bar'}",
+                  retries=0, eta=None, hostname=worker),
+            Event('task-started', uuid=id, hostname=worker)]
+
+
 def task_succeeded_events(worker, id=None, name=None, runtime=0.1234, retries=0, eta=None):
     id = id or uuid()
     name = name or 'sometask'

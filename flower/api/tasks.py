@@ -545,6 +545,8 @@ List tasks
 :query workername: filter task by workername
 :query taskname: filter tasks by taskname
 :query state: filter tasks by state
+:query unverified: filter tasks whose executing worker went offline before a
+                    terminal event was seen (state stays unchanged)
 :query received_start: filter tasks by received date (must be greater than) format %Y-%m-%d %H:%M
 :query received_end: filter tasks by received date (must be less than) format %Y-%m-%d %H:%M
 :query search: search task details using the task-filter query syntax
@@ -559,6 +561,7 @@ List tasks
         worker = self.get_argument('workername', None)
         type = self.get_argument('taskname', None)
         state = self.get_argument('state', None)
+        unverified = self.get_argument('unverified', None, type=bool)
         received_start = self.get_argument('received_start', None)
         received_end = self.get_argument('received_end', None)
         sort_by = self.get_argument('sort_by', None)
@@ -579,13 +582,14 @@ List tasks
         try:
             task_iterator = tasks.iter_tasks(
                     app.events, limit=limit, offset=offset, sort_by=sort_by, type=type,
-                    worker=worker, state=state,
+                    worker=worker, state=state, unverified=unverified,
                     received_start=received_start,
                     received_end=received_end,
                     search=search
             )
             for task_id, task in task_iterator:
-                task = tasks.as_dict(task)
+                task = tasks.as_dict(
+                    task, unverified=app.events.state.is_unverified(task_id))
                 worker = task.pop('worker', None)
                 if worker is not None:
                     task['worker'] = worker.hostname
@@ -705,5 +709,7 @@ Get a task info
         response = task.as_dict()
         if task.worker is not None:
             response['worker'] = task.worker.hostname
+        response['unverified'] = \
+            self.application.events.state.is_unverified(taskid)
 
         self.write(response)

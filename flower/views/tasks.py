@@ -4,7 +4,9 @@ import logging
 from tornado import web
 
 from ..utils.search import QuerySyntaxError
-from ..utils.tasks import as_dict, get_task_by_id, search_tasks
+from ..utils.tasks import (
+    as_dict, get_task_by_id, is_task_unverified, search_tasks,
+)
 from ..views import BaseHandler
 
 logger = logging.getLogger(__name__)
@@ -13,14 +15,17 @@ logger = logging.getLogger(__name__)
 class TaskView(BaseHandler):
     @web.authenticated
     def get(self, task_id):
-        task = get_task_by_id(self.application.events, task_id)
+        events = self.application.events
+        task = get_task_by_id(events, task_id)
 
         if task is None:
             raise web.HTTPError(404, f"Unknown task '{task_id}'")
+        unverified = is_task_unverified(events, task_id)
         task = self.format_task(task)
         self.render(
             "task.html",
             task=task,
+            unverified=unverified,
             read_only=self.application.options.read_only,
         )
 
@@ -63,7 +68,9 @@ class TasksDataTable(BaseHandler):
             task = task_map.get(task_id)
             if task is None:
                 continue
-            task_dict = as_dict(self.format_task((task_id, task))[1])
+            task_dict = as_dict(
+                self.format_task((task_id, task))[1],
+                unverified=app.events.state.is_unverified(task_id))
             if task_dict.get('worker'):
                 task_dict['worker'] = task_dict['worker'].hostname
 

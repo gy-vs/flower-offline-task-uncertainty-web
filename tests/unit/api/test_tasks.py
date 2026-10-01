@@ -13,7 +13,10 @@ from kombu.exceptions import OperationalError
 from tornado.options import options
 
 from flower.events import EventsState
-from tests.unit.utils import task_succeeded_events
+from tests.unit.utils import (
+    task_started_events,
+    task_succeeded_events,
+)
 
 from . import BaseApiTestCase
 
@@ -515,3 +518,63 @@ class TaskTests(BaseApiTestCase):
             'Substring search terms must contain at least 3 characters '
             'at position 0.',
             error['error'])
+
+
+class UnverifiedTaskTests(BaseApiTestCase):
+    def seed_state(self):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        events = [Event('worker-online', hostname='worker1')]
+        events += task_started_events(worker='worker1', id='charge-1')
+        events += task_succeeded_events(worker='worker1', id='charge-2')
+        events.append(Event('worker-offline', hostname='worker1'))
+        for i, e in enumerate(events):
+            e['clock'] = i + 1
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+        return state
+
+    def test_unverified_filter_returns_only_unverified_tasks(self):
+        self.seed_state()
+
+        r = self.get('/api/tasks?unverified=true')
+
+        self.assertEqual(200, r.code)
+        table = json.loads(r.body)
+        self.assertEqual(['charge-1'], list(table))
+        self.assertTrue(table['charge-1']['unverified'])
+        self.assertEqual(states.STARTED, table['charge-1']['state'])
+
+    def test_state_filter_still_matches_reported_state(self):
+        self.seed_state()
+
+        r = self.get('/api/tasks?state=STARTED')
+
+        self.assertEqual(200, r.code)
+        self.assertEqual(['charge-1'], list(json.loads(r.body)))
+
+        r = self.get('/api/tasks?state=SUCCESS')
+        body = json.loads(r.body)
+        self.assertEqual(['charge-2'], list(body))
+        self.assertFalse(body['charge-2']['unverified'])
+
+    def test_search_qualifier_unverified(self):
+        self.seed_state()
+
+        r = self.get('/api/tasks?' + urlencode({'search': 'unverified:true'}))
+
+        self.assertEqual(200, r.code)
+        self.assertEqual(['charge-1'], list(json.loads(r.body)))
+
+    def test_task_info_reports_unverified(self):
+        self.seed_state()
+
+        r1 = self.get('/api/task/info/charge-1')
+        self.assertEqual(200, r1.code)
+        self.assertTrue(json.loads(r1.body)['unverified'])
+
+        r2 = self.get('/api/task/info/charge-2')
+        self.assertEqual(200, r2.code)
+        self.assertFalse(json.loads(r2.body)['unverified'])
+

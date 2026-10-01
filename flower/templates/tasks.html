@@ -18,11 +18,12 @@
   </header>
 
   <nav class="task-state-filters" aria-label="Filter tasks by state">
-    <button class="task-state-filter active" type="button" data-task-state="" aria-pressed="true">All</button>
-    <button class="task-state-filter" type="button" data-task-state="STARTED" aria-pressed="false">Started</button>
-    <button class="task-state-filter" type="button" data-task-state="SUCCESS" aria-pressed="false">Succeeded</button>
-    <button class="task-state-filter" type="button" data-task-state="FAILURE" aria-pressed="false">Failed</button>
-    <button class="task-state-filter" type="button" data-task-state="RETRY" aria-pressed="false">Retried</button>
+    <button class="task-state-filter active" type="button" data-task-filter="" aria-pressed="true">All</button>
+    <button class="task-state-filter" type="button" data-task-filter="state:STARTED" aria-pressed="false">Started</button>
+    <button class="task-state-filter" type="button" data-task-filter="state:SUCCESS" aria-pressed="false">Succeeded</button>
+    <button class="task-state-filter" type="button" data-task-filter="state:FAILURE" aria-pressed="false">Failed</button>
+    <button class="task-state-filter" type="button" data-task-filter="state:RETRY" aria-pressed="false">Retried</button>
+    <button class="task-state-filter task-state-filter-unverified" type="button" data-task-filter="unverified:true" aria-pressed="false">Needs verification</button>
   </nav>
 
   <section class="tasks-table-card" aria-label="Tasks">

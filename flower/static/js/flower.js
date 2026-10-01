@@ -597,7 +597,8 @@
         state: {
             className: "text-center",
             render: function (data, type, full, meta) {
-                var badge;
+                var badge,
+                    badges = '';
                 switch (data) {
                 case 'SUCCESS':
                     badge = 'text-bg-success';
@@ -615,8 +616,16 @@
                     badge = 'text-bg-secondary';
                 }
                 // celery reports unknown task-* events as custom states
-                return '<span class="badge ' + badge + '">' +
+                badges += '<span class="badge ' + badge + '">' +
                     htmlEscapeEntities(data) + '</span>';
+                // "unverified" is a Flower annotation: state stays as Celery
+                // reported it, but the executing worker went offline first
+                if (full.unverified) {
+                    badges += '<span class="badge text-bg-warning task-unverified-badge" ' +
+                        'title="The worker executing this task went offline before Flower saw its result">' +
+                        'UNVERIFIED</span>';
+                }
+                return badges;
             }
         },
         args: {
@@ -697,17 +706,21 @@
         }
     };
 
-    function updateTaskStateButtons(state) {
+    function updateTaskStateButtons(filter) {
         $('.task-state-filter').each(function () {
-            var selected = $(this).data('task-state') === state;
+            var selected = $(this).data('task-filter') === filter;
             $(this).toggleClass('active', selected);
             $(this).attr('aria-pressed', selected);
         });
     }
 
-    function taskStateFromSearch(search) {
+    function taskFilterFromSearch(search) {
         var match = /(?:^|\s)state:(STARTED|SUCCESS|FAILURE|RETRY)(?:\s|$)/i.exec(search);
-        return match ? match[1].toUpperCase() : '';
+        if (match) {
+            return 'state:' + match[1].toUpperCase();
+        }
+        match = /(?:^|\s)unverified:(true|false)(?:\s|$)/i.exec(search);
+        return match ? 'unverified:' + match[1].toLowerCase() : '';
     }
 
     $.urlParam = function (name) {
@@ -976,15 +989,15 @@
             })),
         });
 
-        updateTaskStateButtons(taskStateFromSearch(tasksTable.search()));
+        updateTaskStateButtons(taskFilterFromSearch(tasksTable.search()));
         $('.task-state-filter').on('click', function () {
-            var state = $(this).data('task-state');
-            tasksTable.search(state ? 'state:' + state : '').draw();
-            updateTaskStateButtons(state);
+            var filter = $(this).data('task-filter');
+            tasksTable.search(filter).draw();
+            updateTaskStateButtons(filter);
         });
 
         tasksTable.on('search.dt', function () {
-            updateTaskStateButtons(taskStateFromSearch(tasksTable.search()));
+            updateTaskStateButtons(taskFilterFromSearch(tasksTable.search()));
         });
 
     });

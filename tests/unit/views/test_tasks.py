@@ -8,7 +8,11 @@ from celery.events import Event
 from flower.events import EventsState
 from flower.views.tasks import visible_task_columns
 from tests.unit import AsyncHTTPTestCase
-from tests.unit.utils import task_failed_events, task_succeeded_events
+from tests.unit.utils import (
+    task_failed_events,
+    task_started_events,
+    task_succeeded_events,
+)
 
 
 class TaskTest(AsyncHTTPTestCase):
@@ -84,6 +88,42 @@ class TaskControlsTest(AsyncHTTPTestCase):
             r = self.render_task(self.received_event())
         self.assertEqual(200, r.code)
         self.assertNotIn('task-revoke', str(r.body))
+
+    def test_unverified_started_task_hides_terminate_button(self):
+        r = self.render_task(
+            self.received_event(), self.started_event(),
+            Event('worker-offline', hostname='worker1'))
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertNotIn('task-terminate', body)
+        self.assertIn('UNVERIFIED', body)
+        self.assertIn('Execution unverified', body)
+        # the Celery-reported state is still shown
+        self.assertIn('task-state-started', body)
+        self.assertIn('STARTED', body)
+
+    def test_unverified_flag_clears_after_later_success(self):
+        r = self.render_task(
+            self.received_event(), self.started_event(),
+            Event('worker-offline', hostname='worker1'),
+            Event('worker-online', hostname='worker1'),
+            Event('task-succeeded', uuid='123', result='4',
+                  hostname='worker1'))
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertNotIn('UNVERIFIED', body)
+        self.assertNotIn('task-terminate', body)
+        self.assertIn('text-bg-success', body)
+
+    def test_worker_reonline_keeps_unverified_flag(self):
+        r = self.render_task(
+            self.received_event(), self.started_event(),
+            Event('worker-offline', hostname='worker1'),
+            Event('worker-online', hostname='worker1'))
+        self.assertEqual(200, r.code)
+        body = r.body.decode('utf-8')
+        self.assertIn('UNVERIFIED', body)
+        self.assertNotIn('task-terminate', body)
 
 
 class TasksTest(AsyncHTTPTestCase):
@@ -386,6 +426,62 @@ class TasksTest(AsyncHTTPTestCase):
         self.assertEqual('worker1', tasks[0]['worker'])
 
 
+class UnverifiedDatatableTest(AsyncHTTPTestCase):
+    def datatable(self, search=''):
+        params = {'draw': 1, 'start': 0, 'length': 10}
+        params['search[value]'] = search
+        params['order[0][column]'] = 0
+        params['columns[0][data]'] = 'name'
+        params['order[0][dir]'] = 'asc'
+        r = self.get('/tasks/datatable?' + urlencode(params))
+        self.assertEqual(200, r.code)
+        return json.loads(r.body.decode('utf-8'))
+
+    def seed_state(self):
+        state = EventsState()
+        state.get_or_create_worker('worker1')
+        events = [Event('worker-online', hostname='worker1')]
+        events += task_started_events(worker='worker1', name='task1',
+                                      id='charge-1')
+        events += task_succeeded_events(worker='worker1', name='task1',
+                                        id='charge-2')
+        events.append(Event('worker-offline', hostname='worker1'))
+        for i, e in enumerate(events):
+            e['clock'] = i + 1
+            e['local_received'] = time.time()
+            state.event(e)
+        self._app.events.state = state
+
+    def rows_by_id(self, table):
+        return {row['uuid']: row for row in table['data']}
+
+    def test_rows_carry_unverified_flag(self):
+        self.seed_state()
+
+        rows = self.rows_by_id(self.datatable())
+
+        self.assertTrue(rows['charge-1']['unverified'])
+        self.assertEqual('STARTED', rows['charge-1']['state'])
+        self.assertFalse(rows['charge-2']['unverified'])
+        self.assertEqual('SUCCESS', rows['charge-2']['state'])
+
+    def test_unverified_search_filters_server_side(self):
+        self.seed_state()
+
+        table = self.datatable('unverified:true')
+
+        self.assertEqual(1, table['recordsFiltered'])
+        self.assertEqual(['charge-1'], [row['uuid'] for row in table['data']])
+
+    def test_state_started_search_still_matches(self):
+        self.seed_state()
+
+        table = self.datatable('state:STARTED')
+
+        self.assertEqual(1, table['recordsFiltered'])
+        self.assertEqual(['charge-1'], [row['uuid'] for row in table['data']])
+
+
 class TaskColumnsTest(AsyncHTTPTestCase):
     def header_columns(self):
         r = self.get('/tasks')
@@ -407,3 +503,9 @@ class TaskColumnsTest(AsyncHTTPTestCase):
     def test_default_header(self):
         self.assertEqual(['name', 'uuid', 'state', 'received', 'runtime', 'worker'],
                          self.header_columns())
+
+    def test_unverified_filter_button_renders(self):
+        r = self.get('/tasks')
+        body = r.body.decode('utf-8')
+        self.assertIn('data-task-filter="unverified:true"', body)
+        self.assertIn('Needs verification', body)

@@ -173,6 +173,15 @@ class TestTaskSearchEngine(unittest.TestCase):
         self.assertEqual(set(), self.engine.matching_ids('state:FAIL'))
         self.assertEqual({'1'}, self.engine.matching_ids('state:failure'))
 
+    def test_unverified_requires_the_live_flag(self):
+        # A plain engine has no unverified tasks even if documents exist
+        self.assertEqual(set(), self.engine.matching_ids('unverified:true'))
+
+    def test_unverified_false_matches_non_flagged_documents(self):
+        self.assertEqual(
+            {'1', '2', '3', '4'},
+            self.engine.matching_ids('unverified:false'))
+
     def test_unqualified_search_includes_uuid(self):
         task = self.create_task(
             'unique-uuid-123', 'job.execute', 'SUCCESS', 'worker-a')
@@ -264,6 +273,49 @@ class TestTaskSearchEngine(unittest.TestCase):
         for query, expected in expected_results.items():
             with self.subTest(query=query):
                 self.assertEqual(expected, self.engine.matching_ids(query))
+
+
+class TestUnverifiedFilter(unittest.TestCase):
+    def setUp(self):
+        self.tasks = {
+            '1': SimpleNamespace(
+                uuid='1', name='tasks.charge', state='STARTED',
+                worker=SimpleNamespace(hostname='worker-a'),
+                args=[], kwargs={}, result=None, timestamp=1),
+            '2': SimpleNamespace(
+                uuid='2', name='tasks.charge', state='SUCCESS',
+                worker=SimpleNamespace(hostname='worker-a'),
+                args=[], kwargs={}, result='ok', timestamp=2),
+        }
+        self.engine = TaskSearchEngine(is_unverified={'1'}.__contains__)
+        self.engine.rebuild(self.tasks.items())
+
+    def test_flags_only_unverified_documents(self):
+        self.assertEqual({'1'}, self.engine.matching_ids('unverified:true'))
+        self.assertEqual({'2'}, self.engine.matching_ids('unverified:false'))
+
+    def test_flag_does_not_change_state_postings(self):
+        self.assertEqual({'1'}, self.engine.matching_ids('state:STARTED'))
+        self.assertEqual({'2'}, self.engine.matching_ids('state:SUCCESS'))
+
+    def test_search_parameter_filters_and_counts(self):
+        page = self.engine.search(self.tasks, unverified=True)
+        self.assertEqual(['1'], page.task_ids)
+        self.assertEqual(1, page.filtered_count)
+        self.assertEqual(2, page.total_count)
+
+        page = self.engine.search(self.tasks, unverified=False)
+        self.assertEqual(['2'], page.task_ids)
+        self.assertEqual(1, page.filtered_count)
+
+    def test_upsert_tracks_flag_changes(self):
+        self.tasks['1'].state = 'SUCCESS'
+        # predicate now says the task is no longer unverified
+        self.engine.is_unverified = frozenset().__contains__
+        self.engine.upsert(self.tasks['1'])
+
+        self.assertEqual(set(), self.engine.matching_ids('unverified:true'))
+        self.assertEqual({'1', '2'}, self.engine.matching_ids('state:SUCCESS'))
 
 
 class TestSearchIndexLifecycle(unittest.TestCase):

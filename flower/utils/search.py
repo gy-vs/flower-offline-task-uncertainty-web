@@ -6,9 +6,10 @@ from functools import lru_cache
 
 from kombu.utils.encoding import safe_str
 
-SEARCH_FIELDS = frozenset({'name', 'state', 'worker', 'args', 'kwargs', 'result'})
-EXACT_FIELDS = frozenset({'state'})
-EXACT_INDEX_FIELDS = frozenset({'name', 'state', 'worker'})
+SEARCH_FIELDS = frozenset({'name', 'state', 'worker', 'args', 'kwargs',
+                           'result', 'unverified'})
+EXACT_FIELDS = frozenset({'state', 'unverified'})
+EXACT_INDEX_FIELDS = frozenset({'name', 'state', 'worker', 'unverified'})
 MIN_SUBSTRING_LENGTH = 3
 MAX_QUERY_LENGTH = 2048
 MAX_QUERY_TOKENS = 128
@@ -267,12 +268,13 @@ class SearchDocument:
         'name',
         'result',
         'state',
+        'unverified',
         'worker',
     )
 
     # pylint: disable=too-many-arguments
     def __init__(self, name, state, worker, args, kwargs, result,
-                 all_text, kwargs_pairs):
+                 all_text, kwargs_pairs, unverified):
         self.name = name
         self.state = state
         self.worker = worker
@@ -281,9 +283,10 @@ class SearchDocument:
         self.result = result
         self.all_text = all_text
         self.kwargs_pairs = kwargs_pairs
+        self.unverified = unverified
 
     @classmethod
-    def from_task(cls, task):
+    def from_task(cls, task, unverified=False):
         uuid = _normalize(getattr(task, 'uuid', ''))
         name = _normalize(getattr(task, 'name', ''))
         state = _normalize(getattr(task, 'state', ''))
@@ -299,7 +302,8 @@ class SearchDocument:
             kwargs,
             result,
             f'{uuid}\x00{name}\x00{state}\x00{worker}\x00{args}\x00{kwargs}\x00{result}',
-            _kwargs_pairs(getattr(task, 'kwargs', None)))
+            _kwargs_pairs(getattr(task, 'kwargs', None)),
+            'true' if unverified else '')
 
 
 @dataclass(frozen=True)
@@ -310,8 +314,11 @@ class SearchPage:
 
 
 class TaskSearchEngine:
-    def __init__(self):
+    def __init__(self, is_unverified=None):
         self.documents = {}
+        # Maps a task id to whether Flower currently has an unverified
+        # execution for it; defaults to "never unverified".
+        self.is_unverified = is_unverified or (lambda task_id: False)
         self.exact_postings = {
             field: defaultdict(set)
             for field in EXACT_INDEX_FIELDS
@@ -339,7 +346,8 @@ class TaskSearchEngine:
         self._index(task_id, task)
 
     def _index(self, task_id, task):
-        document = SearchDocument.from_task(task)
+        document = SearchDocument.from_task(
+            task, unverified=self.is_unverified(task_id))
         self.documents[task_id] = document
 
         for field, index in self.exact_postings.items():
@@ -365,8 +373,8 @@ class TaskSearchEngine:
 
     # pylint: disable=too-many-arguments,too-many-locals
     def search(self, tasks, query='', *, task_type=None, worker=None, state=None,
-               received_start=None, received_end=None, sort_by=None,
-               descending=False, offset=0, limit=None):
+               unverified=None, received_start=None, received_end=None,
+               sort_by=None, descending=False, offset=0, limit=None):
         task_map = getattr(tasks, 'data', tasks)
         task_ids = set(self.documents)
         task_ids.intersection_update(task_map.keys())
@@ -380,6 +388,12 @@ class TaskSearchEngine:
         if state:
             task_ids.intersection_update(
                 self.exact_postings['state'].get(_normalize(state), ()))
+        if unverified:
+            task_ids.intersection_update(
+                self.exact_postings['unverified'].get('true', ()))
+        elif unverified is not None:
+            task_ids.difference_update(
+                self.exact_postings['unverified'].get('true', ()))
 
         if received_start is not None or received_end is not None:
             task_ids = {
@@ -438,6 +452,10 @@ class TaskSearchEngine:
         if term.field in EXACT_FIELDS:
             result = set(self.exact_postings[term.field].get(value, ()))
             result.intersection_update(candidates)
+            if term.field == 'unverified' and value == 'false':
+                result = set(candidates)
+                result.difference_update(
+                    self.exact_postings['unverified'].get('true', ()))
             return result
         kwargs_pair = _kwargs_query_pair(value) if term.field == 'kwargs' else None
         if kwargs_pair is not None:

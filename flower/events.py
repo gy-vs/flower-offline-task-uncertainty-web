@@ -8,8 +8,10 @@ import time
 from collections import Counter
 from functools import partial
 
+from celery import states
 from celery.events import EventReceiver
 from celery.events.state import State
+from celery.events.state import _serialize_Task_WeakSet_Mapping
 from kombu.exceptions import OperationalError
 from prometheus_client import Counter as PrometheusCounter
 from prometheus_client import Gauge, Histogram
@@ -19,7 +21,6 @@ from .options import options
 from .utils.search import TaskSearchEngine
 
 logger = logging.getLogger(__name__)
-
 PROMETHEUS_METRICS = None
 
 
@@ -113,11 +114,46 @@ class EventsState(State):
         super().__init__(*args, **kwargs)
         self.counter = collections.defaultdict(Counter)
         self.metrics = get_prometheus_metrics()
-        self.search_engine = TaskSearchEngine()
+        # task id -> clock of the worker-offline event that left the task
+        # without a known worker. Only STARTED tasks can appear here.
+        self.unverified_tasks = {}
+        self.search_engine = TaskSearchEngine(is_unverified=self.is_unverified)
+        self.search_engine.rebuild(self.tasks.items())
+
+    def is_unverified(self, task_id):
+        return task_id in self.unverified_tasks
+
+    def __reduce__(self):
+        # Celery's State.__reduce__ only restores the fields its constructor
+        # knows about, silently dropping subclass attributes. Carry the
+        # unverified set in the pickle state; counter is persisted separately
+        # by Events.save_state and the search engine is rebuilt on unpickling.
+        return (
+            self.__class__,
+            (
+                self.event_callback, self.workers, self.tasks, None,
+                self.max_workers_in_memory, self.max_tasks_in_memory,
+                self.on_node_join, self.on_node_leave,
+                _serialize_Task_WeakSet_Mapping(self.tasks_by_type),
+                _serialize_Task_WeakSet_Mapping(self.tasks_by_worker),
+            ),
+            {'unverified_tasks': dict(self.unverified_tasks)},
+        )
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.search_engine = TaskSearchEngine(is_unverified=self.is_unverified)
         self.search_engine.rebuild(self.tasks.items())
 
     def _clear_tasks(self, ready=True):
         super()._clear_tasks(ready)
+        # _clear_tasks only removes ready tasks; unverified tasks are never
+        # ready, but drop records for anything that left the task table.
+        self.unverified_tasks = {
+            task_id: clock
+            for task_id, clock in self.unverified_tasks.items()
+            if task_id in self.tasks
+        }
         self.search_engine.rebuild(self.tasks.items())
 
     def _eviction_candidate(self, task_id):
@@ -131,22 +167,60 @@ class EventsState(State):
     def _index_task(self, task, evicted):
         if evicted is not None and evicted not in self.tasks:
             self.search_engine.remove(evicted)
+            self.unverified_tasks.pop(evicted, None)
         self.search_engine.upsert(task)
 
+    def _refresh_unverified(self, task_id):
+        # Any newer task event proves the task is no longer tied to the
+        # process whose worker sent the offline event. An offline event
+        # arriving late (older clock than the task event) does not clear it.
+        offline_clock = self.unverified_tasks.get(task_id)
+        if offline_clock is not None:
+            task = self.tasks.get(task_id)
+            if task is None or task.state != states.STARTED or \
+                    (task.clock or 0) > offline_clock:
+                del self.unverified_tasks[task_id]
+
+    def _mark_worker_offline(self, worker, event):
+        # Only tasks bound to this exact worker object belong to the offline
+        # generation; a newer live worker with the same hostname keeps a
+        # different object and is never scanned here.
+        event_clock = event.get('clock')
+        for task_id, task in list(self.tasks.items()):
+            if task_id in self.unverified_tasks:
+                continue
+            if task.state != states.STARTED or task.worker is not worker:
+                continue
+            # An offline event older than the task's last event cannot
+            # describe the execution the task event reported.
+            if event_clock is not None and task.clock \
+                    and task.clock > event_clock:
+                continue
+            self.unverified_tasks[task_id] = event_clock
+            self.search_engine.upsert(task)
+
     def event(self, event):
-        event_type, worker = event['type'], event['hostname']
+        event_type, worker_name = event['type'], event['hostname']
         is_task = event_type.startswith('task-')
         evicted = self._eviction_candidate(event.get('uuid')) if is_task else None
 
+        # An offline event pops and may create workers; keep the one the
+        # event describes so its tasks can be matched by object identity.
+        offline_worker = self.workers.get(worker_name) \
+            if event_type == 'worker-offline' else None
+
         super().event(event)
-        self.counter[worker][event_type] += 1
+        self.counter[worker_name][event_type] += 1
 
         if is_task:
             task = self.tasks[event['uuid']]
+            self._refresh_unverified(event['uuid'])
             self._index_task(task, evicted)
-            self.metrics.observe_task(worker, event, task)
+            self.metrics.observe_task(worker_name, event, task)
         else:
-            self.metrics.observe_worker(worker, event)
+            if event_type == 'worker-offline' and offline_worker is not None:
+                self._mark_worker_offline(offline_worker, event)
+            self.metrics.observe_worker(worker_name, event)
 
 
 class Events(threading.Thread):
@@ -175,6 +249,16 @@ class Events(threading.Thread):
                 # A restored state keeps the limit it was saved with
                 self.state.max_tasks_in_memory = self.state.tasks.limit = max_tasks_in_memory
                 self.state.tasks.update()
+                self.state.unverified_tasks = {
+                    task_id: clock
+                    for task_id, clock
+                    in getattr(self.state, 'unverified_tasks', {}).items()
+                    if task_id in self.state.tasks
+                    and self.state.tasks[task_id].state == states.STARTED
+                }
+                # The search engine holds live inverted indexes and is rebuilt
+                # from the restored task table.
+                self.state.search_engine.rebuild(self.state.tasks.items())
 
             if state_save_interval:
                 self.state_save_timer = PeriodicCallback(self.save_state,

@@ -9,6 +9,7 @@ import time
 from unittest.mock import Mock, patch
 
 from kombu.exceptions import OperationalError
+from celery.events import Event
 from tornado.testing import AsyncTestCase, gen_test
 
 from flower.events import Events
@@ -209,6 +210,60 @@ class PersistenceTests(AsyncTestCase):
             restored = self.events(db)
 
             self.assertEqual({}, dict(restored.state.counter))
+
+    def test_recovers_unverified_tasks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = os.path.join(tmpdir, 'flower')
+            events = self.events(db)
+            state = events.state
+            for clock, event in enumerate((
+                    Event('worker-online', hostname='worker1'),
+                    Event('task-received', uuid='charge-1', name='t',
+                          args=(), kwargs={}, retries=0, eta=None,
+                          hostname='worker1'),
+                    Event('task-started', uuid='charge-1',
+                          hostname='worker1'),
+                    Event('worker-offline', hostname='worker1')), start=1):
+                event['clock'] = clock
+                event['local_received'] = time.time()
+                state.event(event)
+            events.save_state()
+
+            restored = self.events(db)
+
+            self.assertTrue(restored.state.is_unverified('charge-1'))
+            self.assertEqual(
+                {'charge-1'},
+                restored.state.search_engine.matching_ids('unverified:true'))
+
+    def test_recovered_unverified_clears_on_later_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = os.path.join(tmpdir, 'flower')
+            events = self.events(db)
+            state = events.state
+            for clock, event in enumerate((
+                    Event('worker-online', hostname='worker1'),
+                    Event('task-received', uuid='charge-1', name='t',
+                          args=(), kwargs={}, retries=0, eta=None,
+                          hostname='worker1'),
+                    Event('task-started', uuid='charge-1',
+                          hostname='worker1'),
+                    Event('worker-offline', hostname='worker1')), start=1):
+                event['clock'] = clock
+                event['local_received'] = time.time()
+                state.event(event)
+            events.save_state()
+
+            restored = self.events(db)
+            for clock, event in enumerate((
+                    Event('worker-online', hostname='worker1'),
+                    Event('task-succeeded', uuid='charge-1', result='ok',
+                          hostname='worker1')), start=10):
+                event['clock'] = clock
+                event['local_received'] = time.time()
+                restored.state.event(event)
+
+            self.assertFalse(restored.state.is_unverified('charge-1'))
 
 
 class EnableEventsTests(AsyncTestCase):

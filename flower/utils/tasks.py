@@ -5,7 +5,7 @@ import time
 # pylint: disable=too-many-branches,too-many-locals,too-many-arguments
 def iter_tasks(events, limit=None, offset=0, type=None, worker=None, state=None,
                sort_by=None, received_start=None, received_end=None,
-               search=None):
+               search=None, unverified=None):
     descending = False
     if sort_by is not None:
         assert sort_by.lstrip('-') in SORT_KEYS
@@ -14,9 +14,9 @@ def iter_tasks(events, limit=None, offset=0, type=None, worker=None, state=None,
 
     page = search_tasks(
         events, limit=limit, offset=offset, type=type, worker=worker,
-        state=state, sort_by=sort_by, descending=descending,
-        received_start=received_start, received_end=received_end,
-        search=search)
+        state=state, unverified=unverified, sort_by=sort_by,
+        descending=descending, received_start=received_start,
+        received_end=received_end, search=search)
     task_map = getattr(events.state.tasks, 'data', events.state.tasks)
     for task_id in page.task_ids:
         task = task_map.get(task_id)
@@ -25,7 +25,7 @@ def iter_tasks(events, limit=None, offset=0, type=None, worker=None, state=None,
 
 
 def search_tasks(events, limit=None, offset=0, type=None, worker=None,
-                 state=None, sort_by=None, descending=False,
+                 state=None, unverified=None, sort_by=None, descending=False,
                  received_start=None, received_end=None, search=None):
     return events.state.search_engine.search(
         events.state.tasks,
@@ -33,6 +33,7 @@ def search_tasks(events, limit=None, offset=0, type=None, worker=None,
         task_type=type,
         worker=worker,
         state=state,
+        unverified=unverified,
         received_start=_convert_datetime(received_start),
         received_end=_convert_datetime(received_end),
         sort_by=sort_by,
@@ -55,5 +56,12 @@ def get_task_by_id(events, task_id):
     return events.state.tasks.get(task_id)
 
 
-def as_dict(task):
-    return task.as_dict()
+def is_task_unverified(events, task_id):
+    return events.state.is_unverified(task_id)
+
+
+def as_dict(task, unverified=None):
+    data = task.as_dict()
+    if unverified is not None:
+        data['unverified'] = unverified
+    return data
